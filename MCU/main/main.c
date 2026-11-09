@@ -38,6 +38,7 @@
 #include "simple_ctrl.h"
 #include "wifi.h"
 #include "gpio_led.h"
+#include "gpio_switch.h"
 
 static const char *TAG = "APP-MAIN";
 
@@ -46,12 +47,14 @@ static const char *TAG = "APP-MAIN";
 #define KEYBOARD_GPIO_PIN		GPIO_NUM_0
 #define LED_GREEN_GPIO_PIN		GPIO_NUM_12
 #define LED_RED_GPIO_PIN		GPIO_NUM_13
+#define SWITCH_GPIO_PIN			GPIO_NUM_14
 
 #define LED_GREEN_BRIGHTNESS_MAX	64
 #define LED_RED_BRIGHTNESS_MAX		128
 
 static bool config_mode;
 static QueueHandle_t led_queue;
+static uint8_t switch_on;
 
 static void app_show_info(void)
 {
@@ -193,6 +196,8 @@ static bool app_event_notify_callback(struct event_bus_msg *msg)
 			// fflush(stdout);
 			// esp_restart();
 			app_led_set_step(-'P');
+			switch_on = !switch_on;
+			gpio_switch_set_state(switch_on);
 		}
 		/* Smart config */
 		if (msg->param2 == KEYBOARD_EVENT_LONG_RELEASE) {
@@ -234,6 +239,9 @@ void app_main(void)
 	event_bus_register(app_event_notify_callback);
 	event_bus_send(&msg);
 
+	/* Switch */
+	gpio_switch_init(SWITCH_GPIO_PIN, true);
+
 	/* Keyboard */
 	keyboard_init(keyboard_gpios, sizeof(keyboard_gpios));
 
@@ -244,8 +252,6 @@ void app_main(void)
 	simple_ctrl_init("SWITCH");
 	simple_ctrl_set_class_id(CLASS_ID_SWITCH);
 	simple_ctrl_request_register(app_ctrl_request);
-
-	/* Switch */
 
 	wifi_connect();
 
