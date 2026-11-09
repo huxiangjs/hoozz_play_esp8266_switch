@@ -6,7 +6,8 @@ Various switches
 
 ## Switch List
 
-### (1) TODO
+### (1) Simple Switch
+![top](Images/product_view_switch1.jpg)
 
 ### (2) TODO
 
