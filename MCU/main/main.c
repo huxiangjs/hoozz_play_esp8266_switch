@@ -39,6 +39,8 @@
 #include "wifi.h"
 #include "gpio_led.h"
 #include "gpio_switch.h"
+#include "hw_version.h"
+#include "hlw8032.h"
 
 static const char *TAG = "APP-MAIN";
 
@@ -52,9 +54,58 @@ static const char *TAG = "APP-MAIN";
 #define LED_GREEN_BRIGHTNESS_MAX	64
 #define LED_RED_BRIGHTNESS_MAX		128
 
+/*
+ * Hardware version.
+ *
+ * The version is a simple, monotonically increasing number so that future
+ * versions can be added easily (SWITCH_VERSION2, SWITCH_VERSION3, ...).
+ * The app queries this via SWITCH_CMD_GET_VERSION to know which features the
+ * device supports.
+ *
+ *   SWITCH_VERSION0 (0) : simple version   - relay control only
+ *   SWITCH_VERSION1 (1) : advanced version - relay control + voltage/current/
+ *              power measurement + energy metering
+ *
+ * Keep this comment up to date when a new version is added.
+ */
+#define SWITCH_VERSION0			0
+#define SWITCH_VERSION1			1
+
+/* Commands from the app */
+#define SWITCH_CMD_SET_STATE		0x00	/* Set the relay on/off state */
+#define SWITCH_CMD_GET_STATE		0x01	/* Get the relay on/off state */
+#define SWITCH_CMD_GET_VERSION		0x02	/* Get the hardware version */
+#define SWITCH_CMD_GET_MEASURE		0x03	/* Get voltage/current/power (VERSION1 only) */
+#define SWITCH_CMD_GET_ENERGY		0x04	/* Get energy metering data (VERSION1 only) */
+
+#define SWITCH_RESULT_OK		0x00
+#define SWITCH_RESULT_FAIL		0x01
+
+/* Notification types sent to the app */
+#define SWITCH_NOTIFY_STATE_CHANGE	0x00	/* Switch state has changed */
+#define SWITCH_NOTIFY_MEASURE		0x01	/* Voltage/current/power + energy updated */
+
+/* Interval for pushing the measurement/energy data to the app (ms) */
+#define MEASURE_NOTIFY_INTERVAL_MS	1000
+
+/*
+ * Fixed measurement data (for the advanced version, to be replaced with the
+ * real measured values later).
+ * Units:
+ *   Voltage: 0.001V
+ *   Current: 0.001A
+ *   Power:   0.001W
+ *   Energy:  0.001kWh
+ */
+static uint32_t measure_voltage;
+static uint32_t measure_current;
+static uint32_t measure_power;
+static uint32_t measure_energy;
+
 static bool config_mode;
 static QueueHandle_t led_queue;
 static uint8_t switch_on;
+static uint8_t hardware_version;
 
 static void app_show_info(void)
 {
@@ -79,6 +130,62 @@ static void app_led_set_step(char step)
 	xQueueSend(led_queue, (void *)&step, (TickType_t)0);
 }
 
+/* Write a 32-bit value to the buffer in little-endian order */
+static void put_u32_le(char *buffer, uint32_t value)
+{
+	buffer[0] = (value >> 0) & 0xff;
+	buffer[1] = (value >> 8) & 0xff;
+	buffer[2] = (value >> 16) & 0xff;
+	buffer[3] = (value >> 24) & 0xff;
+}
+
+/* Notify the app that the switch state has changed */
+static void app_notify_state_change(void)
+{
+	char buffer[2];
+
+	buffer[0] = SWITCH_NOTIFY_STATE_CHANGE;
+	buffer[1] = switch_on;
+	simple_ctrl_notify(buffer, sizeof(buffer));
+}
+
+/*
+ * Push the latest measurement/energy data to the app.
+ * Payload: [type(1B), voltage(4B), current(4B), power(4B), energy(4B)],
+ * all little-endian. Units: voltage 0.001V, current 0.001A, power 0.001W,
+ * energy 0.001kWh.
+ */
+static void app_notify_measure(void)
+{
+	char buffer[1 + 16];
+	int offs = 1;
+
+	buffer[0] = SWITCH_NOTIFY_MEASURE;
+
+	put_u32_le(buffer + offs, measure_voltage);
+	offs += 4;
+	put_u32_le(buffer + offs, measure_current);
+	offs += 4;
+	put_u32_le(buffer + offs, measure_power);
+	offs += 4;
+	put_u32_le(buffer + offs, measure_energy);
+	offs += 4;
+
+	simple_ctrl_notify(buffer, offs);
+}
+
+/*
+ * Periodically push the measurement/energy data to the app so it can stay
+ * in sync (advanced version only, started in app_main).
+ */
+static void app_measure_task(void *arg)
+{
+	for (;;) {
+		vTaskDelay(pdMS_TO_TICKS(MEASURE_NOTIFY_INTERVAL_MS));
+		app_notify_measure();
+	}
+}
+
 static int app_ctrl_request(char *buffer, int buf_offs, int vaild_size, int buff_size)
 {
 	if (vaild_size < 1) {
@@ -90,6 +197,49 @@ static int app_ctrl_request(char *buffer, int buf_offs, int vaild_size, int buff
 		goto nomem_err;
 
 	switch (buffer[buf_offs]) {
+	case SWITCH_CMD_SET_STATE:		/* Set the relay state */
+		if (vaild_size != 2)
+			goto lllegal_err;
+		switch_on = buffer[buf_offs + 1] ? 1 : 0;
+		gpio_switch_set_state(switch_on);
+		ESP_LOGI(TAG, "Switch state has been set to %s",
+				switch_on ? "on" : "off");
+		buffer[buf_offs + 1] = SWITCH_RESULT_OK;
+		return 2;
+	case SWITCH_CMD_GET_STATE:		/* Get the relay state */
+		if (buff_size - buf_offs < 3)
+			goto nomem_err;
+		buffer[buf_offs + 1] = SWITCH_RESULT_OK;
+		buffer[buf_offs + 2] = switch_on;
+		return 3;
+	case SWITCH_CMD_GET_VERSION:	/* Get the hardware version */
+		if (buff_size - buf_offs < 3)
+			goto nomem_err;
+		buffer[buf_offs + 1] = SWITCH_RESULT_OK;
+		buffer[buf_offs + 2] = hardware_version;
+		return 3;
+	case SWITCH_CMD_GET_MEASURE:	/* Get voltage/current/power (VERSION1 only) */
+		if (hardware_version != SWITCH_VERSION1) {
+			buffer[buf_offs + 1] = SWITCH_RESULT_FAIL;
+			return 2;
+		}
+		if (buff_size - buf_offs < 2 + 12)
+			goto nomem_err;
+		buffer[buf_offs + 1] = SWITCH_RESULT_OK;
+		put_u32_le(buffer + buf_offs + 2, measure_voltage);
+		put_u32_le(buffer + buf_offs + 6, measure_current);
+		put_u32_le(buffer + buf_offs + 10, measure_power);
+		return 2 + 12;
+	case SWITCH_CMD_GET_ENERGY:	/* Get energy metering data (VERSION1 only) */
+		if (hardware_version != SWITCH_VERSION1) {
+			buffer[buf_offs + 1] = SWITCH_RESULT_FAIL;
+			return 2;
+		}
+		if (buff_size - buf_offs < 2 + 4)
+			goto nomem_err;
+		buffer[buf_offs + 1] = SWITCH_RESULT_OK;
+		put_u32_le(buffer + buf_offs + 2, measure_energy);
+		return 2 + 4;
 	default:
 		goto lllegal_err;
 	}
@@ -198,6 +348,8 @@ static bool app_event_notify_callback(struct event_bus_msg *msg)
 			app_led_set_step(-'P');
 			switch_on = !switch_on;
 			gpio_switch_set_state(switch_on);
+			/* Let the app know the state has been changed by the physical button */
+			app_notify_state_change();
 		}
 		/* Smart config */
 		if (msg->param2 == KEYBOARD_EVENT_LONG_RELEASE) {
@@ -206,6 +358,18 @@ static bool app_event_notify_callback(struct event_bus_msg *msg)
 			config_mode = true;
 		}
 		break;
+	case EVENT_BUS_MEASURE_VOLTAGE_UPDATED:
+		measure_voltage = msg->param2;
+		break;
+	case EVENT_BUS_MEASURE_CURRENT_UPDATED:
+		measure_current = msg->param2;
+		break;
+	case EVENT_BUS_MEASURE_POWER_UPDATED:
+		measure_power = msg->param2;
+		break;
+	case EVENT_BUS_MEASURE_ENERGY_UPDATED:
+		measure_energy = msg->param2;
+		break;
 	}
 
 	return false;
@@ -213,11 +377,17 @@ static bool app_event_notify_callback(struct event_bus_msg *msg)
 
 void app_main(void)
 {
+	int ret;
 	struct event_bus_msg msg = { EVENT_BUS_STARTUP, 0, 0};
 	uint8_t keyboard_gpios[] = { KEYBOARD_GPIO_PIN };
 
 	print_chip_info();
 	app_show_info();
+
+	hw_version_init();
+	hardware_version = (uint8_t)hw_version_get_id();
+
+	ESP_LOGI(TAG, "Hardware version: %u (0=simple, 1=advanced)", hardware_version);
 
 	/* GPIO LED */
 	gpio_led_init(LED_RED_GPIO_PIN, LED_GREEN_GPIO_PIN);
@@ -252,6 +422,16 @@ void app_main(void)
 	simple_ctrl_init("SWITCH");
 	simple_ctrl_set_class_id(CLASS_ID_SWITCH);
 	simple_ctrl_request_register(app_ctrl_request);
+
+	/* VERSION1 (advanced): periodically push measurement/energy data to the app */
+	if (hardware_version == SWITCH_VERSION1) {
+		ret = hlw8032_init(UART_NUM_0);
+		if (!ret) {
+			ret = xTaskCreate(app_measure_task, "app_measure_task", 1024,
+					  NULL, tskIDLE_PRIORITY + 1, NULL);
+			ESP_ERROR_CHECK(ret != pdPASS);
+		}
+	}
 
 	wifi_connect();
 
