@@ -225,6 +225,11 @@ static int app_ctrl_request(char *buffer, int buf_offs, int vaild_size, int buff
 		gpio_switch_set_state(switch_on);
 		ESP_LOGI(TAG, "Switch state has been set to %s",
 				switch_on ? "on" : "off");
+		/*
+		 * Notify all connected apps (including the one that made the
+		 * request) so every client stays in sync.
+		 */
+		app_notify_state_change();
 		buffer[buf_offs + 1] = SWITCH_RESULT_OK;
 		return 2;
 	case SWITCH_CMD_GET_STATE:		/* Get the relay state */
