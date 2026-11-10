@@ -5,6 +5,11 @@
 
 PROJECT_NAME := switch
 
+# The rules below are defined before the SDK makefiles are included, so pin
+# the default goal to 'all' (the first target would otherwise be
+# git_version.h and make would build nothing else).
+.DEFAULT_GOAL := all
+
 #
 # Build-time version info for tracking, printed to the serial log at
 # startup by print_build_info() in main.c:
