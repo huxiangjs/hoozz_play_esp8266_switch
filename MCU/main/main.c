@@ -30,6 +30,7 @@
 #include <esp_system.h>
 #include <esp_spi_flash.h>
 #include <esp_log.h>
+#include <esp_idf_version.h>
 #include <nvs_flash.h>
 
 #include "event_bus.h"
@@ -112,6 +113,24 @@ static void app_show_info(void)
 	int size = esp_get_free_heap_size();
 
 	ESP_LOGI(TAG, "Free heap size: %dbytes", size);
+}
+
+static void print_build_info(void)
+{
+	/*
+	 * Version tracking: which commit the firmware was built from (git
+	 * branch + short sha, with a "-dirty" marker for uncommitted changes),
+	 * when it was built, and which SDK it was built with (ESP_IDF_VERSION
+	 * is the SDK release, IDF_VER is the SDK's git describe injected by
+	 * the SDK build system). The APP_GIT_* macros are injected by the
+	 * project Makefile.
+	 */
+	ESP_LOGI(TAG, "Build: git %s/%s%s, built %s %s",
+		 APP_GIT_BRANCH, APP_GIT_SHA, APP_GIT_DIRTY,
+		 __DATE__, __TIME__);
+	ESP_LOGI(TAG, "SDK: %d.%d.%d (%s)",
+		 ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR, ESP_IDF_VERSION_PATCH,
+		 IDF_VER);
 }
 
 static void print_chip_info(void)
@@ -381,6 +400,7 @@ void app_main(void)
 	struct event_bus_msg msg = { EVENT_BUS_STARTUP, 0, 0};
 	uint8_t keyboard_gpios[] = { KEYBOARD_GPIO_PIN };
 
+	print_build_info();
 	print_chip_info();
 	app_show_info();
 
