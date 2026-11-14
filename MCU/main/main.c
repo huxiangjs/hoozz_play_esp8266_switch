@@ -43,6 +43,8 @@
 #include "gpio_switch.h"
 #include "hw_version.h"
 #include "hlw8032.h"
+#include "ota.h"
+#include "ota_flash.h"
 
 static const char *TAG = "APP-MAIN";
 
@@ -401,6 +403,11 @@ static bool app_event_notify_callback(struct event_bus_msg *msg)
 	return false;
 }
 
+/* The OTA transports this device supports (url scheme -> callbacks). */
+static const struct ota_transport ota_transports[] = {
+	{ "hoozz", hoozz_ota_open, hoozz_ota_size, hoozz_ota_read, hoozz_ota_close },
+};
+
 void app_main(void)
 {
 	int ret;
@@ -425,6 +432,12 @@ void app_main(void)
 
 	/* NVS init */
 	ESP_ERROR_CHECK(nvs_flash_init());
+
+	/* Enable OTA (after NVS: the ESP-IDF flash backend's first-boot
+	 * validation stores its state there) */
+	simple_ctrl_ota_enable(APP_GIT_SHA APP_GIT_DIRTY, ota_transports,
+			sizeof(ota_transports) / sizeof(ota_transports[0]),
+			&esp_idf_ota_flash);
 
 	/* install gpio isr service */
 	ESP_ERROR_CHECK(gpio_install_isr_service(0));
